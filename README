@@ -1,0 +1,21 @@
+acidipy
+
+Cisco Open NX-OS Python API : NEXus-os Developing Interface for PYthon
+
+1. Install
+
+	1.1 From GIT
+		$ python setup.py build
+		$ python setup.py install
+
+	1.2 From PIP
+		$ pip install nexdipy
+
+2. Example
+
+	import nxosdipy
+	
+	node = nxosdipy.Node('xxx.xxx.xxx.xxx', 'user', 'password') # Get node connection
+	
+	node.close() # Close node connection
+
