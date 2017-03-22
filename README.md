@@ -3,9 +3,11 @@ Cisco Open NX-OS Python API
 
 **NEX**us-os **D**eveloping **I**nterface for **PY**thon
 
-version : 0.1.0
+version : 0.1.1
 
-last change : initial commit
+last change : add model & pod & multi-pod & CLI
+
+![Relations](./doc/Relation.png)
 
 ## Support Object
 
@@ -16,6 +18,7 @@ last change : initial commit
 | topSystem | nexSystemObject | System | System Description |
 | interfaceEntity | nexInterfaceObject | Interface | Interface Entity |
 | l1PhysIf | nexPhysIfObject | PhysIf | Physical Interfaces |
+| pcAggrIf | nexAggrIfObject | AggrIf | Aggregated Interfaces |
 | l3Inst | nexContextObject | Context | L3 Context (VRF) |
 
 **And Retrieve Anything with Node Object through "Class()" Method**
@@ -36,5 +39,7 @@ last change : initial commit
 	import nxosdipy
 	
 	node = nxosdipy.Node('xxx.xxx.xxx.xxx', 'user', 'password') # Get node connection
+	
+	node.System.Interface.PhysIf.list() # Retrive physical interface list
 	
 	node.close() # Close node connection

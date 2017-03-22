@@ -311,10 +311,65 @@ class PathInterface:
             return nexdipy_obj
         raise ExceptNexdipyCreateObject(self.node, self.class_name, ExceptNexdipyProcessing(self.node, 'Creation Failed'))
 
+class PodRootInterface:
+     
+    def __init__(self, pod, class_name):
+        self.pod = pod
+        self.class_name = class_name
+         
+    def list(self, detail=False, sort=None, page=None, **clause):
+        ret = {}; fetchs = []
+        def fetch(pod, node_name, class_name, detail, sort, page, clause, ret): ret[node_name] = pod[node_name].Class(class_name).list(detail, sort, page, **clause)
+        for node_name in self.pod: fetchs.append(gevent.spawn(fetch, self.pod, node_name, self.class_name, detail, sort, page, clause, ret))
+        gevent.joinall(fetchs)
+        return ret
+     
+    def count(self, **clause):
+        ret = {}; fetchs = []
+        def fetch(pod, node_name, class_name, clause, ret): ret[node_name] = pod[node_name].Class(class_name).count(**clause)
+        for node_name in self.pod: fetchs.append(gevent.spawn(fetch, self.pod, node_name, self.class_name, clause, ret))
+        gevent.joinall(fetchs)
+        return ret
+    
+    def health(self):
+        ret = {}; fetchs = []
+        def fetch(pod, node_name, class_name, ret): ret[node_name] = pod[node_name].Class(class_name).health()
+        for node_name in self.pod: fetchs.append(gevent.spawn(fetch, self.pod, node_name, self.class_name, ret))
+        gevent.joinall(fetchs)
+        return ret
+
+class PodPathInterface:
+         
+    def __init__(self, pod, actor_name):
+        self.pod = pod
+        self.actor_name = actor_name
+     
+    def list(self, detail=False, sort=None, page=None, **clause):
+        ret = {}; fetchs = []
+        def fetch(pod, node_name, actor_name, detail, sort, page, clause, ret): ret[node_name] = pod[node_name].__getattribute__(actor_name).list(detail, sort, page, **clause) 
+        for node_name in self.pod: fetchs.append(gevent.spawn(fetch, self.pod, node_name, self.actor_name, detail, sort, page, clause, ret))
+        gevent.joinall(fetchs)
+        return ret
+    
+    def count(self, **clause):
+        ret = {}; fetchs = []
+        def fetch(pod, node_name, actor_name, clause, ret): ret[node_name] = pod[node_name].__getattribute__(actor_name).count(**clause)
+        for node_name in self.pod: fetchs.append(gevent.spawn(fetch, self.pod, node_name, self.actor_name, clause, ret))
+        gevent.joinall(fetchs)
+        return ret
+     
+    def health(self):
+        ret = {}; fetchs = []
+        def fetch(pod, node_name, actor_name, ret): ret[node_name] = pod[node_name].__getattribute__(actor_name).health() 
+        for node_name in self.pod: fetchs.append(gevent.spawn(fetch, self.pod, node_name, self.actor_name, ret))
+        gevent.joinall(fetchs)
+        return ret
+
 class ObjectInterface(dict):
     
     def __init__(self, **attributes):
         dict.__init__(self, **attributes)
+        self._object_delta = None
         
     def __setup__(self, node, detail, class_name, obj_name=None):
         self.node = node
@@ -327,10 +382,15 @@ class ObjectInterface(dict):
     def __patch__(self):
         pass
     
+    def __setitem__(self, key, val):
+        if self._object_delta == None: self._object_delta = {}
+        self._object_delta[key] = val
+        return dict.__setitem__(self, key, val)
+    
     def toJson(self):
         data = {}
         data[self.class_name] = {'attributes' : self}
-        return json.dumps(data, sort_keys=True)
+        return json.dumps(data)
     
     def keys(self):
         if self.class_name in PREPARE_ATTRIBUTES: return PREPARE_ATTRIBUTES[self.class_name]
@@ -428,7 +488,8 @@ class ObjectInterface(dict):
         return PathInterface(self, class_name, class_pkey, class_ident)
     
     def update(self):
-        try: ret = self.node.put('/api/node/mo/' + self['dn'] + '.json', data=self.toJson())
+        self._object_delta['dn'] = self['dn']
+        try: ret = self.node.post('/api/node/mo/' + self['dn'] + '.json', data=json.dumps({self.class_name : {'attributes' : self._object_delta}}))
         except Exception as e: raise ExceptNexdipyUpdateObject(self.node, self['dn'], e)
         if not ret: raise ExceptNexdipyUpdateObject(self.node, self['dn'], ExceptNexdipyProcessing(self.node, 'Updating Failed')) 
         return True
@@ -463,6 +524,9 @@ class ObjectInterface(dict):
 
 class nexPhysIfActor(PathInterface):
     def __init__(self, parent): PathInterface.__init__(self, parent, 'l1PhysIf', 'id', '/phys-[%s]')
+
+class nexAggrIfActor(PathInterface):
+    def __init__(self, parent): PathInterface.__init__(self, parent, 'pcAttrIf', 'id', '/aggr-[%s]')
     
 class nexContextActor(PathInterface):
     def __init__(self, parent): PathInterface.__init__(self, parent, 'l3Inst', 'name', '/inst-%s')
@@ -491,6 +555,8 @@ class nexInterfaceObject(ObjectInterface):
 
 class nexPhysIfObject(ObjectInterface): pass
 
+class nexAggrIfObject(ObjectInterface): pass
+
 class nexContextObject(ObjectInterface): pass
         
 #################################################
@@ -505,7 +571,66 @@ class nexContextObject(ObjectInterface): pass
 #################################################
 
 class Node(Session, ObjectInterface):
-            
+    
+    class CLI:
+        
+        def __init__(self, node):
+            self.node = node
+        
+        def __console_line_interface__(self, cli_type, *cmd):
+            headers = {'content-type':'application/json'}
+            data = {'ins_api':{'version':'1.0','type':cli_type,'chunk':'0','sid':'1','input':' ;'.join(cmd),'output_format':'json'}}
+            auth = (self.node.user, self.node.pwd)
+            cmd_len = len(cmd)
+            for _ in range(0, self.node.retry):
+                resp = self.node.session.post(self.node.url + '/ins', data=json.dumps(data), headers=headers, auth=auth)
+                if resp.status_code == 200:
+                    results = resp.json()['ins_api']['outputs']['output']
+                    if cmd_len > 1:
+                        if cli_type != 'cli_conf': ret = [None for _ in cmd]
+                        else: ret = [False for _ in cmd]
+                        if isinstance(results, list):
+                            for i in range(0, len(results)):
+                                result = results[i]
+                                if result['code'] == '200':
+                                    if cli_type != 'cli_conf': ret[i] = result['body']
+                                    else: ret[i] = True
+                                else:
+                                    try: err = result['clierror']
+                                    except:
+                                        try: err = result['basherror']
+                                        except: err = None
+                                    raise ExceptNexdipyCLI(self.node, result['msg'], err)
+                        return ret
+                    else:
+                        if results['code'] == '200' :
+                            if cli_type != 'cli_conf': return results['body']
+                            else: return True
+                        else:
+                            try: err = results['clierror']
+                            except:
+                                try: err = results['basherror']
+                                except: err = None
+                            raise ExceptNexdipyCLI(self.node, results['msg'], err)
+                        if cli_type != 'cli_conf': return None
+                        else: return False
+                elif resp.status_code == 403: self.refresh()
+                else: raise ExceptNexdipyResponse(self, resp.status_code, ' ;'.join(cmd))
+            raise ExceptNexdipySession(self)
+        
+        def User(self, *cmd):
+            return self.__console_line_interface__('cli_show_ascii', *cmd)
+        
+        def Json(self, *cmd):
+            return self.__console_line_interface__('cli_show', *cmd)
+        
+        def Conf(self, *cmd):
+            return self.__console_line_interface__('cli_conf', *cmd)
+        
+        def Bash(self, *cmd):
+            ret = self.__console_line_interface__('bash', ' ; echo "__NEXDIPY_LF__" ;'.join(cmd))
+            return ret.split('__NEXDIPY_LF__\n')
+    
     def __init__(self, ip, user, pwd, refresh_sec=NEXDIPY_REFRESH_SEC, **kargs):
         Session.__init__(self,
                          ip=ip,
@@ -524,6 +649,13 @@ class Node(Session, ObjectInterface):
         self.subscriber = None
         
         self.System = self('sys', detail=True)
+        self.PhysIf = RootInterface(self, 'l1PhysIf')
+        self.AggrIf = RootInterface(self, 'pcAggrIf')
+        self.Context = RootInterface(self, 'l3Inst')
+        
+        self.CLI = Node.CLI(self)
+        
+        self['name'] = self.System['name']
         
     def close(self):
         if self.subscriber != None: self.subscriber.close()
@@ -555,163 +687,159 @@ class Node(Session, ObjectInterface):
                 return nexdipy_obj
         raise ExceptNexdipyNonExistData(self, dn)
 
+######################################
+#  ________  ________  ________      #
+# |\   __  \|\   __  \|\   ___ \     #
+# \ \  \|\  \ \  \|\  \ \  \_|\ \    #
+#  \ \   ____\ \  \\\  \ \  \ \\ \   #
+#   \ \  \___|\ \  \\\  \ \  \_\\ \  #
+#    \ \__\    \ \_______\ \_______\ #
+#     \|__|     \|_______|\|_______| #
+#                                    #
+######################################
 
-#####################################################################
-#  ________  ________  _____ ______   ________  ___  ________       #
-# |\   ___ \|\   __  \|\   _ \  _   \|\   __  \|\  \|\   ___  \     #
-# \ \  \_|\ \ \  \|\  \ \  \\\__\ \  \ \  \|\  \ \  \ \  \\ \  \    #
-#  \ \  \ \\ \ \  \\\  \ \  \\|__| \  \ \   __  \ \  \ \  \\ \  \   #
-#   \ \  \_\\ \ \  \\\  \ \  \    \ \  \ \  \ \  \ \  \ \  \\ \  \  #
-#    \ \_______\ \_______\ \__\    \ \__\ \__\ \__\ \__\ \__\\ \__\ #
-#     \|_______|\|_______|\|__|     \|__|\|__|\|__|\|__|\|__| \|__| #
-#                                                                   #
-#####################################################################
-
-
-
-############################################################################################################################
-#  _____ ______   ___  ___  ___   _________  ___          ________  ________  _____ ______   ________  ___  ________       #
-# |\   _ \  _   \|\  \|\  \|\  \ |\___   ___\\  \        |\   ___ \|\   __  \|\   _ \  _   \|\   __  \|\  \|\   ___  \     #
-# \ \  \\\__\ \  \ \  \\\  \ \  \\|___ \  \_\ \  \       \ \  \_|\ \ \  \|\  \ \  \\\__\ \  \ \  \|\  \ \  \ \  \\ \  \    #
-#  \ \  \\|__| \  \ \  \\\  \ \  \    \ \  \ \ \  \       \ \  \ \\ \ \  \\\  \ \  \\|__| \  \ \   __  \ \  \ \  \\ \  \   #
-#   \ \  \    \ \  \ \  \\\  \ \  \____\ \  \ \ \  \       \ \  \_\\ \ \  \\\  \ \  \    \ \  \ \  \ \  \ \  \ \  \\ \  \  #
-#    \ \__\    \ \__\ \_______\ \_______\ \__\ \ \__\       \ \_______\ \_______\ \__\    \ \__\ \__\ \__\ \__\ \__\\ \__\ #
-#     \|__|     \|__|\|_______|\|_______|\|__|  \|__|        \|_______|\|_______|\|__|     \|__|\|__|\|__|\|__|\|__| \|__| #
-#                                                                                                                          #
-############################################################################################################################
-
-
-
-
-#===============================================================================
-# Multi Domain
-#===============================================================================
-
-# class MultiDomain(dict):
-#     
-#     class Actor:
-#         
-#         def __init__(self, multi_dom, actor_name):
-#             self.multi_dom = multi_dom
-#             self.actor_name = actor_name
-#         
-#         def list(self, detail=False, sort=None, page=None, **clause):
-#             ret = {}; fetchs = []
-#             def fetch(multi_dom, dom_name, actor_name, detail, sort, page, clause, ret): ret[dom_name] = multi_dom[dom_name].__getattribute__(actor_name).list(detail, sort, page, **clause) 
-#             for dom_name in self.multi_dom: fetchs.append(gevent.spawn(fetch, self.multi_dom, dom_name, self.actor_name, detail, sort, page, clause, ret))
-#             gevent.joinall(fetchs)
-#             return ret
-#         
-#         def health(self):
-#             ret = {}; fetchs = []
-#             def fetch(multi_dom, dom_name, actor_name, ret): ret[dom_name] = multi_dom[dom_name].__getattribute__(actor_name).health() 
-#             for dom_name in self.multi_dom: fetchs.append(gevent.spawn(fetch, self.multi_dom, dom_name, self.actor_name, ret))
-#             gevent.joinall(fetchs)
-#             return ret
-#             
-#         def count(self, **clause):
-#             ret = {}; fetchs = []
-#             def fetch(multi_dom, dom_name, actor_name, clause, ret): ret[dom_name] = multi_dom[dom_name].__getattribute__(actor_name).count(**clause)
-#             for dom_name in self.multi_dom: fetchs.append(gevent.spawn(fetch, self.multi_dom, dom_name, self.actor_name, clause, ret))
-#             gevent.joinall(fetchs)
-#             return ret
-#     
-#     class ClassActor:
-#         
-#         def __init__(self, multi_dom, class_name):
-#             self.multi_dom = multi_dom
-#             self.class_name = class_name
-#             
-#         def list(self, detail=False, sort=None, page=None, **clause):
-#             ret = {}; fetchs = []
-#             def fetch(multi_dom, dom_name, class_name, detail, sort, page, clause, ret): ret[dom_name] = multi_dom[dom_name].Class(class_name).list(detail, sort, page, **clause)
-#             for dom_name in self.multi_dom: fetchs.append(gevent.spawn(fetch, self.multi_dom, dom_name, self.class_name, detail, sort, page, clause, ret))
-#             gevent.joinall(fetchs)
-#             return ret
-#         
-#         def count(self, **clause):
-#             ret = {}; fetchs = []
-#             def fetch(multi_dom, dom_name, class_name, clause, ret): ret[dom_name] = multi_dom[dom_name].Class(class_name).count(**clause)
-#             for dom_name in self.multi_dom: fetchs.append(gevent.spawn(fetch, self.multi_dom, dom_name, self.class_name, clause, ret))
-#             gevent.joinall(fetchs)
-#             return ret
-#     
-#     def __init__(self,
-#                  conns=RestAPI.DEFAULT_CONN_SIZE,
-#                  conn_max=RestAPI.DEFAULT_CONN_MAX,
-#                  retry=RestAPI.DEFAULT_CONN_RETRY,
-#                  refresh_sec=ACIDIPY_REFRESH_SEC,
-#                  debug=False):
-#         dict.__init__(self)
-#         self.conns = conns
-#         self.conn_max = conn_max
-#         self.retry = retry
-#         self.refresh_sec = refresh_sec
-#         self.debug = debug
-#         
-#         self.Tenant = MultiDomain.Actor(self, 'Tenant')
-#         self.Filter = MultiDomain.Actor(self, 'Filter')
-#         self.Contract = MultiDomain.Actor(self, 'Contract')
-#         self.Context = MultiDomain.Actor(self, 'Context')
-#         self.L3Out = MultiDomain.Actor(self, 'L3Out')
-#         self.L3Profile = MultiDomain.Actor(self, 'L3Profile')
-#         self.BridgeDomain = MultiDomain.Actor(self, 'BridgeDomain')
-#         self.AppProfile = MultiDomain.Actor(self, 'AppProfile')
-#         self.FilterEntry = MultiDomain.Actor(self, 'FilterEntry')
-#         self.Subject = MultiDomain.Actor(self, 'Subject')
-#         self.Subnet = MultiDomain.Actor(self, 'Subnet')
-#         self.EPG = MultiDomain.Actor(self, 'EPG')
-#         self.Endpoint = MultiDomain.Actor(self, 'Endpoint')
-#         
-#         self.Pod = MultiDomain.Actor(self, 'Pod')
-#         
-#         self.Node = MultiDomain.Actor(self, 'Node')
-#         self.Paths = MultiDomain.Actor(self, 'Paths')
-#         self.VPaths = MultiDomain.Actor(self, 'VPaths')
-#         self.Path = MultiDomain.Actor(self, 'Path')
-#         self.System = MultiDomain.Actor(self, 'System')
-#         self.PhysIf = MultiDomain.Actor(self, 'PhysIf')
-#         
-#         self.Fault = MultiDomain.Actor(self, 'Fault')
-#     
-#     def Class(self, class_name):
-#         return MultiDomain.ClassActor(self, class_name)
-#     
-#     def detail(self): return self
-#     
-#     def health(self):
-#         ret = {}; fetchs = []
-#         def fetch(multi_dom, dom_name, ret): ret[dom_name] = multi_dom[dom_name].health() 
-#         for dom_name in self: fetchs.append(gevent.spawn(fetch, self, dom_name, ret))
-#         gevent.joinall(fetchs)
-#         return ret
-#         
-#     def addDomain(self, domain_name, ip, user, pwd):
-#         if domain_name in self:
-#             if self.debug: print('[Error]Nxosdipy:Multidomain:AddDomain:Already Exist Domain %s' % domain_name)
-#             return False
-#         opts = {'ip' : ip,
-#                 'user' : user,
-#                 'pwd' : pwd,
-#                 'conns' : self.conns,
-#                 'conn_max' : self.conn_max,
-#                 'retry' : self.retry,
-#                 'refresh_sec' : self.refresh_sec,
-#                 'debug' : self.debug}
-#         try: ctrl = Controller(**opts)
-#         except Exception as e:
-#             if self.debug: print('[Error]Nxosdipy:Multidomain:AddDomain:%s' % str(e))
-#             return False
-#         self[domain_name] = ctrl
-#         return True
-#     
-#     def delDomain(self, domain_name):
-#         if domain_name not in self: return False
-#         self[domain_name].close()
-#         self.pop(domain_name)
-#         return True
-#     
-#     def close(self):
-#         dom_names = self.keys()
-#         for dom_name in dom_names: self.delDomain(dom_name)
+class Pod(dict):
+     
+    def __init__(self,
+                 conns=RestAPI.DEFAULT_CONN_SIZE,
+                 conn_max=RestAPI.DEFAULT_CONN_MAX,
+                 retry=RestAPI.DEFAULT_CONN_RETRY,
+                 refresh_sec=NEXDIPY_REFRESH_SEC,
+                 debug=False):
+        dict.__init__(self)
+        self.conns = conns
+        self.conn_max = conn_max
+        self.retry = retry
+        self.refresh_sec = refresh_sec
+        self.debug = debug
+        self.node_ip_names = {}
         
+        self.System = PodRootInterface(self, 'topSystem')
+        self.PhysIf = PodPathInterface(self, 'PhysIf')
+        self.AggrIf = PodPathInterface(self, 'AggrIf')
+        self.Context = PodPathInterface(self, 'Context')
+        
+    def Class(self, class_name):
+        return PodRootInterface(self, class_name)
+     
+    def detail(self):
+        return self
+    
+    def refresh(self):
+        return self
+     
+    def health(self):
+        ret = {}; fetchs = []
+        def fetch(pod, node_name, ret): ret[node_name] = pod[node_name].health() 
+        for node_name in self: fetchs.append(gevent.spawn(fetch, self, node_name, ret))
+        gevent.joinall(fetchs)
+        return ret
+         
+    def addNode(self, ip, user, pwd):
+        if ip in self.node_ip_names:
+            if self.debug: print('[Error]Nxosdipy:Pod:AddNode:Already Exist Node %s' % ip)
+            return None
+        opts = {'ip' : ip,
+                'user' : user,
+                'pwd' : pwd,
+                'conns' : self.conns,
+                'conn_max' : self.conn_max,
+                'retry' : self.retry,
+                'refresh_sec' : self.refresh_sec,
+                'debug' : self.debug}
+        try: node = Node(**opts)
+        except Exception as e:
+            if self.debug: print('[Error]Nxosdipy:Pod:AddNode:%s' % str(e))
+            return None
+        self[node['name']] = node
+        self.node_ip_names[ip] = node['name']
+        return node
+     
+    def delNode(self, node_name):
+        if node_name not in self: return False
+        self[node_name].close()
+        self.pop(node_name)
+        ip_names = None
+        for ip, name in self.node_ip_names.items():
+            if name == node_name:
+                ip_names = ip
+                break
+        if ip_names: self.node_ip_names.pop(ip_names)
+        return True
+     
+    def close(self):
+        node_names = self.keys()
+        for node_name in node_names: self.delNode(node_name)
+
+#####################################################################################
+#  _____ ______   ___  ___  ___   _________  ___  ________  ________  ________      #
+# |\   _ \  _   \|\  \|\  \|\  \ |\___   ___\\  \|\   __  \|\   __  \|\   ___ \     #
+# \ \  \\\__\ \  \ \  \\\  \ \  \\|___ \  \_\ \  \ \  \|\  \ \  \|\  \ \  \_|\ \    #
+#  \ \  \\|__| \  \ \  \\\  \ \  \    \ \  \ \ \  \ \   ____\ \  \\\  \ \  \ \\ \   #
+#   \ \  \    \ \  \ \  \\\  \ \  \____\ \  \ \ \  \ \  \___|\ \  \\\  \ \  \_\\ \  #
+#    \ \__\    \ \__\ \_______\ \_______\ \__\ \ \__\ \__\    \ \_______\ \_______\ #
+#     \|__|     \|__|\|_______|\|_______|\|__|  \|__|\|__|     \|_______|\|_______| #
+#                                                                                   #
+#####################################################################################
+
+class MultiPod(dict):
+     
+    def __init__(self,
+                 conns=RestAPI.DEFAULT_CONN_SIZE,
+                 conn_max=RestAPI.DEFAULT_CONN_MAX,
+                 retry=RestAPI.DEFAULT_CONN_RETRY,
+                 refresh_sec=NEXDIPY_REFRESH_SEC,
+                 debug=False):
+        dict.__init__(self)
+        self.conns = conns
+        self.conn_max = conn_max
+        self.retry = retry
+        self.refresh_sec = refresh_sec
+        self.debug = debug
+        
+        self.System = PodPathInterface(self, 'System')
+        self.PhysIf = PodPathInterface(self, 'PhysIf')
+        self.AggrIf = PodPathInterface(self, 'AggrIf')
+        self.Context = PodPathInterface(self, 'Context')
+        
+    def Class(self, class_name):
+        return PodRootInterface(self, class_name)
+     
+    def detail(self):
+        return self
+    
+    def refresh(self):
+        return self
+     
+    def health(self):
+        ret = {}; fetchs = []
+        def fetch(multi_pod, pod_name, ret): ret[pod_name] = multi_pod[pod_name].health() 
+        for pod_name in self: fetchs.append(gevent.spawn(fetch, self, pod_name, ret))
+        gevent.joinall(fetchs)
+        return ret
+         
+    def addPod(self, pod_name):
+        if pod_name in self:
+            if self.debug: print('[Error]Nxosdipy:MultiPod:AddPod:Already Exist Pod %s' % pod_name)
+            return None
+        opts = {'conns' : self.conns,
+                'conn_max' : self.conn_max,
+                'retry' : self.retry,
+                'refresh_sec' : self.refresh_sec,
+                'debug' : self.debug}
+        try: pod = Pod(**opts)
+        except Exception as e:
+            if self.debug: print('[Error]Nxosdipy:MultiPod:AddPod:%s' % str(e))
+            return None
+        self[pod_name] = pod
+        return pod
+     
+    def delPod(self, pod_name):
+        if pod_name not in self: return False
+        self[pod_name].close()
+        self.pop(pod_name)
+        return True
+     
+    def close(self):
+        pod_names = self.keys()
+        for pod_name in pod_names: self.delPod(pod_name)
